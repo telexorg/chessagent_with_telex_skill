@@ -1,6 +1,7 @@
 from pydantic import BaseModel, UUID4, Field, model_validator
 from typing import List, Optional, Dict, Union, Literal, NamedTuple, Any
 from enum import Enum
+from uuid import uuid4
 
 
 class ErrorDetail(NamedTuple):
@@ -203,6 +204,6 @@ class RPCRequest(BaseModel):
 
 class RPCResponse(BaseModel):
     jsonrpc: str = "2.0"
-    id: str
+    id: int | str | None = Field(default_factory=lambda: uuid4().hex)
     result: Result | None = None
     error: JSONRPCError | None = None

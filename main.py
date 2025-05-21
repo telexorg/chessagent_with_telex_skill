@@ -39,35 +39,21 @@ class RedisKeys:
     games = "games"
 
 
-def generate_random_filename(extension: str = "svg", word_count: int = 3) -> str:
-    words = [
-        "sun",
-        "moon",
-        "tree",
-        "cloud",
-        "river",
-        "stone",
-        "eagle",
-        "wolf",
-        "fire",
-        "wind",
-        "storm",
-        "leaf",
-        "sky",
-        "night",
-        "light",
-        "shadow",
-        "mountain",
-        "ocean",
-        "echo",
-        "whisper",
-        "flame",
-        "dust",
-        "branch",
+class RandomNameRepository:
+    WORDS = [
+        "sun", "moon", "tree", "cloud", "river", "stone", "eagle", "wolf", "fire",
+        "wind", "storm", "leaf", "sky", "night", "light", "shadow", "mountain",
+        "ocean", "echo", "whisper", "flame", "dust", "branch",
     ]
-    chosen = random.sample(words, word_count)
-    return "_".join(chosen) + f".{extension}"
 
+    @classmethod
+    def generate_filename(cls, extension: str = "svg", word_count: int = 3) -> str:
+        words = random.sample(cls.WORDS, word_count)
+        return "_".join(words) + f".{extension}"
+
+    @classmethod
+    def generate_suffix(cls, word_count: int = 2) -> str:
+        return "_".join(random.sample(cls.WORDS, word_count))
 
 class Game:
     def __init__(self, board, engine, engine_time_limit=0.5):
@@ -105,30 +91,38 @@ class GameRepository:
         self.r = redis_client
         self.prefix = redis_key_prefix
 
-    def _session_key(self, session_id: str) -> str:
-        return f"{self.prefix}:{session_id}"
+    def _game_key(self, task_id: str) -> str:
+        return f"{self.prefix}:{task_id}"
 
-    def save(self, session_id: str, game: Game):
-        key = self._session_key(session_id)
+    def save(self, task_id: str, game: Game):
+        key = self._game_key(task_id)
         self.r.set(key, json.dumps(game.to_dict()))
 
-    def load(self, session_id: str) -> Optional[Game]:
-        key = self._session_key(session_id)
+    def load(self, task_id: str) -> Optional[Game]:
+        key = self._game_key(task_id)
         data = self.r.get(key)
         if data:
             return Game.from_dict(json.loads(data))
         return None
 
-    def delete(self, session_id: str):
-        key = self._session_key(session_id)
+    def delete(self, task_id: str):
+        key = self._game_key(task_id)
         self.r.delete(key)
 
+    def start_game(self, engine_path: str) -> Game:
+        engine = chess.engine.SimpleEngine.popen_uci(engine_path)
+        board = chess.Board()
 
-def start_game(engine_path: str) -> Game:
-    engine = chess.engine.SimpleEngine.popen_uci(engine_path)
-    board = chess.Board()
+        return Game(board, engine)
 
-    return Game(board, engine)
+    def parse_command(self, message: str) -> str:
+        message = message.strip()
+        message_lowercase = message.lower()
+
+        if "resign" in message_lowercase:
+            return "resign"
+
+        return message
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -136,43 +130,8 @@ def read_root():
     return '<p style="font-size:40px">Chess bot A2A</p>'
 
 
-game_repo = GameRepository(r)
-
-
-async def handle_task_send(request_id: str, params: models.TaskParams):
-    session_id = params.sessionId
-    game = game_repo.load(session_id)
-
-    if not game:
-        game = start_game(engine_path=CHESS_ENGINE_PATH)
-
-    tentative_move = params.message.parts[0].text
-    try:
-        game.usermove(tentative_move)
-    except ValueError:
-        response = models.RPCResponse(
-            id=request_id,
-            error=models.InvalidParamsError(
-                message=f"Invalid move: '{tentative_move}'",
-                data=f"You sent '{tentative_move}' which is not a valid chess move",
-            ),
-        )
-        print(response)
-        return response
-    except:
-        response = models.RPCResponse(
-            id=request_id,
-            error=models.InvalidParamsError(
-                message="An error occured",
-            ),
-        )
-        return response
-
-    aimove, board = game.aimove()
-
-    game_repo.save(session_id, game)
-
-    filename = generate_random_filename()  # e.g., 'cloud_stone_echo.svg'
+def generate_board_image(board):
+    filename = RandomNameRepository.generate_filename()
     destination_file = f"public/chessagent/{filename}"
     source_file = f"/tmp/{filename}"
 
@@ -197,19 +156,104 @@ async def handle_task_send(request_id: str, params: models.TaskParams):
 
     image_url = f"https://media.tifi.tv/{MINIO_BUCKET_NAME}/{destination_file}"
 
+    return image_url, filename
+
+
+game_repo = GameRepository(r)
+
+
+async def handle_task_send(params: models.TaskParams):
+    session_id = params.sessionId
+    task_id = params.id
+    game = game_repo.load(task_id)
+
+    if not game:
+        game = game_repo.start_game(engine_path=CHESS_ENGINE_PATH)
+
+    user_input = params.message.parts[0].text.strip()
+    user_move = game_repo.parse_command(user_input)
+
+    if user_move == "resign":
+        return models.RPCResponse(
+            result=models.Result(
+                id=params.id,
+                session_id=params.sessionId,
+                status=models.TaskStatus(
+                    state=models.TaskState.completed,
+                    timestamp=datetime.datetime.now().isoformat(),
+                    message=models.Message(
+                        role="agent",
+                        parts=[
+                            models.TextPart(text="Game ended by resignation."),
+                            models.TextPart(
+                                text="Start a new game by entering a valid move."
+                            ),
+                        ],
+                    ),
+                ),
+            ),
+        )
+
+    try:
+        game.usermove(user_move)
+    except ValueError:
+        response = models.RPCResponse(
+            error=models.InvalidParamsError(
+                message=f"Invalid move: '{user_move}'",
+                data=f"You sent '{user_move}' which is not a valid chess move",
+            ),
+        )
+        return response
+    except:
+        response = models.RPCResponse(
+            error=models.InvalidParamsError(
+                message="An error occured",
+            ),
+        )
+        return response
+
+    aimove, board = game.aimove()
+    game_repo.save(task_id, game)
+    image_url, filename = generate_board_image(board)
+
+    if board.is_game_over():
+        return models.RPCResponse(
+            result=models.Result(
+                id=task_id,
+                session_id=session_id,
+                status=models.TaskStatus(
+                    state=models.TaskState.completed,
+                    timestamp=datetime.datetime.now().isoformat(),
+                    message=models.Message(
+                        role="agent",
+                        parts=[
+                            models.TextPart(text=f"Game over. AI moved {aimove.uci()}"),
+                            models.FilePart(
+                                file=models.FileContent(
+                                    name=filename,
+                                    mimeType="image/svg+xml",
+                                    uri=image_url,
+                                )
+                            ),
+                            models.TextPart(text="Start a new game by entering a valid move"),
+                        ],
+                    ),
+                ),
+            ),
+        )
+
     response = models.RPCResponse(
-        id=request_id,
         result=models.Result(
-            id=params.id,
-            session_id=params.sessionId,
+            id=task_id,
+            session_id=session_id,
             status=models.TaskStatus(
                 state=models.TaskState.inputrequired,
                 timestamp=datetime.datetime.now().isoformat(),
                 message=models.Message(
                     role="agent",
                     parts=[
-                        models.TextPart(text=aimove.uci()),
-                        models.TextPart(text=str(board)),
+                        models.TextPart(text=f"AI moved {aimove.uci()}"),
+                        # models.TextPart(text=str(board)),
                         models.FilePart(
                             file=models.FileContent(
                                 name=filename,
@@ -226,26 +270,30 @@ async def handle_task_send(request_id: str, params: models.TaskParams):
     return response
 
 
-async def handle_get_task(id: int, params: models.TaskParams):
+async def handle_get_task(params: models.TaskParams):
     return "bro"
 
 
 @app.post("/")
 async def handle_rpc(rpc_request: models.RPCRequest):
     if rpc_request.method == models.RPCMethod.TASK_SEND:
-        return await handle_task_send(rpc_request.id, rpc_request.params)
+        return await handle_task_send(params=rpc_request.params)
     elif rpc_request.method == models.RPCMethod.TASK_GET:
-        return await handle_get_task(rpc_request.id, rpc_request.params)
+        return await handle_get_task(params=rpc_request.params)
 
     raise HTTPException(status_code=400, detail="Could not handle task")
 
-
+agent_name_suffix = (
+    os.getenv("APP_ENV") + "_" + RandomNameRepository.generate_suffix()
+    if os.getenv("APP_ENV") == "local"
+    else ""
+)
 @app.get("/.well-known/agent.json")
 def agent_card(request: Request):
     external_base = request.headers.get("x-external-base-url", "")
     base_url = str(request.base_url).rstrip("/") + external_base
     card = {
-        "name": "Chess Agent",
+        "name": f"Chess Agent - {agent_name_suffix}",
         "description": "An agent that plays chess. Accepts moves in standard notation and returns updated board state as FEN and an image.",
         "url": f"{base_url}",
         "provider": {
