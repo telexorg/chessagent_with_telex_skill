@@ -284,7 +284,7 @@ async def handle_rpc(rpc_request: models.RPCRequest):
     raise HTTPException(status_code=400, detail="Could not handle task")
 
 agent_name_suffix = (
-    os.getenv("APP_ENV") + "_" + RandomNameRepository.generate_suffix()
+    "-" + os.getenv("APP_ENV") + "_" + RandomNameRepository.generate_suffix()
     if os.getenv("APP_ENV") == "local"
     else ""
 )
@@ -293,7 +293,7 @@ def agent_card(request: Request):
     external_base = request.headers.get("x-external-base-url", "")
     base_url = str(request.base_url).rstrip("/") + external_base
     card = {
-        "name": f"Chess Agent - {agent_name_suffix}",
+        "name": f"Chess Agent {agent_name_suffix}",
         "description": "An agent that plays chess. Accepts moves in standard notation and returns updated board state as FEN and an image.",
         "url": f"{base_url}",
         "provider": {
