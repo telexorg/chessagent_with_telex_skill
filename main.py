@@ -121,6 +121,8 @@ class GameRepository:
 
         if "resign" in message_lowercase:
             return "resign"
+        if "board" in message_lowercase:
+            return "board"
 
         return message
 
@@ -172,6 +174,32 @@ async def handle_task_send(params: models.TaskParams):
 
     user_input = params.message.parts[0].text.strip()
     user_move = game_repo.parse_command(user_input)
+
+    if user_move == "board":
+        image_url, filename = generate_board_image(board)
+        return models.RPCResponse(
+            result=models.Result(
+                id=params.id,
+                session_id=params.sessionId,
+                status=models.TaskStatus(
+                    state=models.TaskState.completed,
+                    timestamp=datetime.datetime.now().isoformat(),
+                    message=models.Message(
+                        role="agent",
+                        parts=[
+                            models.TextPart(text="Board state is:"),
+                            models.FilePart(
+                                file=models.FileContent(
+                                    name=filename,
+                                    mimeType="image/svg+xml",
+                                    uri=image_url,
+                                )
+                            ),
+                        ],
+                    ),
+                ),
+            ),
+        )        
 
     if user_move == "resign":
         return models.RPCResponse(
