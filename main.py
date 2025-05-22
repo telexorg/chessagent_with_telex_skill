@@ -176,7 +176,7 @@ async def handle_task_send(params: models.TaskParams):
     user_move = game_repo.parse_command(user_input)
 
     if user_move == "board":
-        image_url, filename = generate_board_image(board)
+        image_url, filename = generate_board_image(game.board)
         return models.RPCResponse(
             result=models.Result(
                 id=params.id,
