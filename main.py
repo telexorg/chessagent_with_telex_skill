@@ -177,6 +177,7 @@ async def handle_task_send(params: models.TaskParams):
 
     if user_move == "board":
         image_url, filename = generate_board_image(game.board)
+        print(game.to_dict(), image_url)
         return models.RPCResponse(
             result=models.Result(
                 id=params.id,
