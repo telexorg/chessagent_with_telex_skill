@@ -9,7 +9,7 @@ from fastapi import FastAPI, BackgroundTasks, Request, Body, HTTPException
 from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 from uuid import uuid4 as uuid
-import models
+import a2a
 import redis
 import chess
 import chess.engine
@@ -164,9 +164,10 @@ def generate_board_image(board):
 game_repo = GameRepository(r)
 
 
-async def handle_task_send(params: models.TaskParams):
+async def handle_task_send(params: a2a.TaskSendParams):
     session_id = params.sessionId
     task_id = params.id
+    
     game = game_repo.load(task_id)
 
     if not game:
@@ -177,19 +178,18 @@ async def handle_task_send(params: models.TaskParams):
 
     if user_move == "board":
         image_url, filename = generate_board_image(game.board)
-        return models.RPCResponse(
-            result=models.Result(
+        return a2a.SendTaskResponse(
+            result=a2a.Task(
                 id=params.id,
-                session_id=params.sessionId,
-                status=models.TaskStatus(
-                    state=models.TaskState.submitted,
-                    timestamp=datetime.datetime.now().isoformat(),
-                    message=models.Message(
+                sessionId=params.sessionId,
+                status=a2a.TaskStatus(
+                    state=a2a.TaskState.INPUT_REQUIRED,
+                    message=a2a.Message(
                         role="agent",
                         parts=[
-                            models.TextPart(text="Board state is:"),
-                            models.FilePart(
-                                file=models.FileContent(
+                            a2a.TextPart(text="Board state is:"),
+                            a2a.FilePart(
+                                file=a2a.FileContent(
                                     name=filename,
                                     mimeType="image/svg+xml",
                                     uri=image_url,
@@ -202,18 +202,17 @@ async def handle_task_send(params: models.TaskParams):
         )        
 
     if user_move == "resign":
-        return models.RPCResponse(
-            result=models.Result(
+        return a2a.SendTaskResponse(
+            result=a2a.Task(
                 id=params.id,
-                session_id=params.sessionId,
-                status=models.TaskStatus(
-                    state=models.TaskState.completed,
-                    timestamp=datetime.datetime.now().isoformat(),
-                    message=models.Message(
+                sessionId=params.sessionId,
+                status=a2a.TaskStatus(
+                    state=a2a.TaskState.COMPLETED,
+                    message=a2a.Message(
                         role="agent",
                         parts=[
-                            models.TextPart(text="Game ended by resignation."),
-                            models.TextPart(
+                            a2a.TextPart(text="Game ended by resignation."),
+                            a2a.TextPart(
                                 text="Start a new game by entering a valid move."
                             ),
                         ],
@@ -225,16 +224,16 @@ async def handle_task_send(params: models.TaskParams):
     try:
         game.usermove(user_move)
     except ValueError:
-        response = models.RPCResponse(
-            error=models.InvalidParamsError(
+        response = a2a.SendTaskResponse(
+            error=a2a.InvalidParamsError(
                 message=f"Invalid move: '{user_move}'",
                 data=f"You sent '{user_move}' which is not a valid chess move",
             ),
         )
         return response
     except:
-        response = models.RPCResponse(
-            error=models.InvalidParamsError(
+        response = a2a.SendTaskResponse(
+            error=a2a.InvalidParamsError(
                 message="An error occured",
             ),
         )
@@ -245,45 +244,43 @@ async def handle_task_send(params: models.TaskParams):
     image_url, filename = generate_board_image(board)
 
     if board.is_game_over():
-        return models.RPCResponse(
-            result=models.Result(
+        return a2a.SendTaskResponse(
+            result=a2a.Task(
                 id=task_id,
-                session_id=session_id,
-                status=models.TaskStatus(
-                    state=models.TaskState.completed,
-                    timestamp=datetime.datetime.now().isoformat(),
-                    message=models.Message(
+                sessionId=session_id,
+                status=a2a.TaskStatus(
+                    state=a2a.TaskState.COMPLETED,
+                    message=a2a.Message(
                         role="agent",
                         parts=[
-                            models.TextPart(text=f"Game over. AI moved {aimove.uci()}"),
-                            models.FilePart(
-                                file=models.FileContent(
+                            a2a.TextPart(text=f"Game over. AI moved {aimove.uci()}"),
+                            a2a.FilePart(
+                                file=a2a.FileContent(
                                     name=filename,
                                     mimeType="image/svg+xml",
                                     uri=image_url,
                                 )
                             ),
-                            models.TextPart(text="Start a new game by entering a valid move"),
+                            a2a.TextPart(text="Start a new game by entering a valid move"),
                         ],
                     ),
                 ),
             ),
         )
 
-    response = models.RPCResponse(
-        result=models.Result(
+    response = a2a.SendTaskResponse(
+        result=a2a.Task(
             id=task_id,
-            session_id=session_id,
-            status=models.TaskStatus(
-                state=models.TaskState.inputrequired,
-                timestamp=datetime.datetime.now().isoformat(),
-                message=models.Message(
+            sessionId=session_id,
+            status=a2a.TaskStatus(
+                state=a2a.TaskState.WORKING,
+                message=a2a.Message(
                     role="agent",
                     parts=[
-                        models.TextPart(text=f"AI moved {aimove.uci()}"),
-                        # models.TextPart(text=str(board)),
-                        models.FilePart(
-                            file=models.FileContent(
+                        a2a.TextPart(text=f"AI moved {aimove.uci()}"),
+                        # a2a.TextPart(text=str(board)),
+                        a2a.FilePart(
+                            file=a2a.FileContent(
                                 name=filename,
                                 mimeType="image/svg+xml",
                                 uri=image_url,
@@ -298,58 +295,84 @@ async def handle_task_send(params: models.TaskParams):
     return response
 
 
-async def handle_get_task(params: models.TaskParams):
-    return "bro"
+async def handle_get_task(params: a2a.TaskQueryParams):
+    response = a2a.GetTaskResponse(
+        result=a2a.Task(
+            id="task_id",
+            sessionId="session_id",
+            status=a2a.TaskStatus(
+                state=a2a.TaskState.COMPLETED,
+                message=a2a.Message(
+                    role="agent",
+                    parts=[
+                        a2a.TextPart(text=f"Completed the stuff"),
+                    ],
+                ),
+            ),
+        ),
+    )
 
+    return response
 
 @app.post("/")
-async def handle_rpc(rpc_request: models.RPCRequest):
-    if rpc_request.method == models.RPCMethod.TASK_SEND:
-        return await handle_task_send(params=rpc_request.params)
-    elif rpc_request.method == models.RPCMethod.TASK_GET:
-        return await handle_get_task(params=rpc_request.params)
+async def handle_rpc(request_data: dict):
+    try:
+        # Parse the request using the TypeAdapter
+        rpc_request = a2a.A2ARequest.validate_python(request_data)
 
-    raise HTTPException(status_code=400, detail="Could not handle task")
+        if isinstance(rpc_request, a2a.SendTaskRequest):
+            print("tasks/send")
+            return await handle_task_send(params=rpc_request.params)
+        elif isinstance(rpc_request, a2a.GetTaskRequest):
+            print("tasks/get")
+            return await handle_get_task(params=rpc_request.params)
+        else:
+            raise HTTPException(status_code=400, detail="Method not supported")
+            
+    except Exception as e:
+        print(f"Error processing request: {e}")
+        raise HTTPException(status_code=400, detail="Could not handle task")
 
 agent_name_suffix = (
     "-" + os.getenv("APP_ENV") + "_" + RandomNameRepository.generate_suffix()
     if os.getenv("APP_ENV") == "local"
     else ""
 )
+
 @app.get("/.well-known/agent.json")
 def agent_card(request: Request):
     external_base = request.headers.get("x-external-base-url", "")
     base_url = str(request.base_url).rstrip("/") + external_base
-    card = {
-        "name": f"Chess Agent {agent_name_suffix}",
-        "description": "An agent that plays chess. Accepts moves in standard notation and returns updated board state as FEN and an image.",
-        "url": f"{base_url}",
-        "provider": {
-            "organization": "CoolVicradon",
-            "url": f"{base_url}/provider",
-        },
-        "version": "1.0.0",
-        "documentationUrl": f"{base_url}/docs",
-        "capabilities": {
-            "streaming": False,
-            "pushNotifications": False,
-            "stateTransitionHistory": True,
-        },
-        "authentication": {"schemes": ["Bearer"]},
-        "defaultInputModes": ["text/plain"],
-        "defaultOutputModes": ["application/x-fen", "image/png"],
-        "skills": [
-            {
-                "id": "play_move",
-                "name": "Play Move",
-                "description": "Plays a move and returns the updated board in FEN format and as an image.",
-                "tags": ["chess", "gameplay", "board"],
-                "examples": ["e4", "Nf3", "d5"],
-                "inputModes": ["text/plain"],
-                "outputModes": ["application/x-fen", "image/png"],
-            }
+    card = a2a.AgentCard(
+        name=f"Chess Agent {agent_name_suffix}",
+        description="An agent that plays chess. Accepts moves in standard notation and returns updated board state as FEN and an image.",
+        url=f"{base_url}",
+        provider=a2a.AgentProvider(
+            organization="CoolVicradon",
+            url=f"{base_url}/provider",
+        ),
+        version="1.0.0",
+        documentationUrl=f"{base_url}/docs",
+        capabilities=a2a.AgentCapabilities(
+            streaming=False,
+            pushNotifications=False,
+            stateTransitionHistory=True,
+        ),
+        authentication=a2a.AgentAuthentication(schemes=["Bearer"]),
+        defaultInputModes=["text/plain"],
+        defaultOutputModes=["application/x-fen", "image/png"],
+        skills=[
+            a2a.AgentSkill(
+                id="play_move",
+                name="Play Move",
+                description="Plays a move and returns the updated board in FEN format and as an image.",
+                tags=["chess", "gameplay", "board"],
+                examples=["e4", "Nf3", "d5"],
+                inputModes=["text/plain"],
+                outputModes=["application/x-fen", "image/png"],
+            )
         ],
-    }
+    )
 
     return card
 
