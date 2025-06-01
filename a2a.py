@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Optional, Literal, Self
 from uuid import uuid4
 
 from pydantic import (
@@ -12,16 +12,24 @@ from pydantic import (
     model_validator,
 )
 
+class Role(Enum):
+    user = "user"
+    agent = "agent"
+
+    class Config:
+        use_enum_values = True
+
 
 class TaskState(str, Enum):
-    SUBMITTED = 'submitted'
-    WORKING = 'working'
-    INPUT_REQUIRED = 'input-required'
-    COMPLETED = 'completed'
-    CANCELED = 'canceled'
-    FAILED = 'failed'
-    UNKNOWN = 'unknown'
-
+    submitted = 'submitted'
+    working = 'working'
+    input_required = 'input-required'
+    completed = 'completed'
+    canceled = 'canceled'
+    failed = 'failed'
+    unknown = 'unknown'
+    rejected = 'rejected'
+    auth_required = 'auth_required'
 
 class TextPart(BaseModel):
     type: Literal['text'] = 'text'
@@ -62,12 +70,29 @@ class DataPart(BaseModel):
 
 Part = Annotated[TextPart | FilePart | DataPart, Field(discriminator='type')]
 
+class PushNotificationAuthenticationInfo(BaseModel):
+    schemes: list[str]
+    credentials: Optional[str] = None
+
+class PushNotificationConfig(BaseModel):
+    url: str
+    token: Optional[str] = None
+    authentication: Optional[PushNotificationAuthenticationInfo] = None 
+
+class MessageSendConfiguration(BaseModel):
+    acceptedOutputModes: list[str]
+    historyLength: Optional[int] = 0
+    pushNotificationConfig: Optional[PushNotificationConfig] = None
+    blocking: Optional[bool] = None
 
 class Message(BaseModel):
+    kind: Literal['message'] = "message"
     role: Literal['user', 'agent']
     parts: list[Part]
     metadata: dict[str, Any] | None = None
-
+    messageId: str
+    contextId: str | None = None
+    taskId: str | None = None
 
 class TaskStatus(BaseModel):
     state: TaskState
@@ -91,7 +116,8 @@ class Artifact(BaseModel):
 
 class Task(BaseModel):
     id: str
-    sessionId: str | None = None
+    kind: Literal["task"] = "task"
+    contextId: str | None = None
     status: TaskStatus
     artifacts: list[Artifact] | None = None
     history: list[Message] | None = None
@@ -131,15 +157,14 @@ class TaskIdParams(BaseModel):
 
 class TaskQueryParams(TaskIdParams):
     historyLength: int | None = None
+    method: Literal["tasks/get"] = "tasks/get"
 
-
-class TaskSendParams(BaseModel):
-    id: str
-    sessionId: str = Field(default_factory=lambda: uuid4().hex)
-    message: Message
-    acceptedOutputModes: list[str] | None = None
-    pushNotification: PushNotificationConfig | None = None
+class MessageQueryParams(TaskIdParams):
     historyLength: int | None = None
+
+class MessageSendParams(BaseModel):
+    message: Message
+    configuration: Optional[MessageSendConfiguration] = None
     metadata: dict[str, Any] | None = None
 
 
@@ -172,18 +197,18 @@ class JSONRPCResponse(JSONRPCMessage):
     error: JSONRPCError | None = None
 
 
-class SendTaskRequest(JSONRPCRequest):
-    method: Literal['tasks/send'] = 'tasks/send'
-    params: TaskSendParams
+class SendMessageRequest(JSONRPCRequest):
+    method: Literal['message/send'] = 'message/send'
+    params: MessageSendParams
 
 
-class SendTaskResponse(JSONRPCResponse):
-    result: Task | None = None
+class SendMessageResponse(JSONRPCResponse):
+    result: Task | Message | None = None
 
 
 class SendTaskStreamingRequest(JSONRPCRequest):
     method: Literal['tasks/sendSubscribe'] = 'tasks/sendSubscribe'
-    params: TaskSendParams
+    params: MessageSendParams
 
 
 class SendTaskStreamingResponse(JSONRPCResponse):
@@ -193,6 +218,10 @@ class SendTaskStreamingResponse(JSONRPCResponse):
 class GetTaskRequest(JSONRPCRequest):
     method: Literal['tasks/get'] = 'tasks/get'
     params: TaskQueryParams
+
+class GetMessageRequest(JSONRPCRequest):
+    method: Literal['message/get'] = 'message/get'
+    params: MessageQueryParams
 
 
 class GetTaskResponse(JSONRPCResponse):
@@ -237,7 +266,7 @@ class TaskResubscriptionRequest(JSONRPCRequest):
 
 A2ARequest = TypeAdapter(
     Annotated[
-        SendTaskRequest
+        SendMessageRequest
         | GetTaskRequest
         | CancelTaskRequest
         | SetTaskPushNotificationRequest

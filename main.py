@@ -56,16 +56,18 @@ class RandomNameRepository:
         return "_".join(random.sample(cls.WORDS, word_count))
 
 class Game:
-    def __init__(self, board, engine, engine_time_limit=0.5):
+    def __init__(self, board, engine, engine_time_limit=0.5, state=a2a.TaskState.unknown):
         self.board = board
         self.engine = engine
         self.engine_time_limit = engine_time_limit
+        self.state = state
 
     def aimove(self):
         ai = self.engine.play(
             self.board, chess.engine.Limit(time=self.engine_time_limit)
         )
         self.board.push(ai.move)
+        self.state = a2a.TaskState.input_required
         return ai.move, self.board
 
     def usermove(self, move):
@@ -76,14 +78,21 @@ class Game:
         return self.board
 
     def to_dict(self):
-        return {"fen": self.board.fen(), "engine_time_limit": self.engine_time_limit}
+        return {"fen": self.board.fen(), "engine_time_limit": self.engine_time_limit, "state": self.state.value}
 
     @classmethod
     def from_dict(cls, data):
         board = chess.Board(data["fen"])
         engine_time_limit = data.get("engine_time_limit", 0.5)
         engine = chess.engine.SimpleEngine.popen_uci(CHESS_ENGINE_PATH)
-        return cls(board, engine, engine_time_limit)
+        state_str = data.get("state", "unknown")
+
+        try:
+            state = a2a.TaskState(state_str)
+        except ValueError:
+            state = a2a.TaskState.unknown
+
+        return cls(board, engine, engine_time_limit, state)
 
 
 class GameRepository:
@@ -93,6 +102,19 @@ class GameRepository:
 
     def _game_key(self, task_id: str) -> str:
         return f"{self.prefix}:{task_id}"
+
+    def task_state(self, task_id: str) -> a2a.TaskState:
+        key = self._game_key(task_id)
+        data = self.r.get(key)
+        if data:
+            data_json = json.loads(data)
+            state_str = data_json.get("state", "unknown")
+            try:
+                return a2a.TaskState(state_str)
+            except ValueError:
+                return a2a.TaskState.unknown
+
+        return a2a.TaskState().unknown
 
     def save(self, task_id: str, game: Game):
         key = self._game_key(task_id)
@@ -104,6 +126,12 @@ class GameRepository:
         if data:
             return Game.from_dict(json.loads(data))
         return None
+
+    def game_over(self, task_id: str):
+        game = self.load(task_id)
+        if game:
+            game.state = a2a.TaskState.completed
+            self.save(task_id, game)
 
     def delete(self, task_id: str):
         key = self._game_key(task_id)
@@ -164,10 +192,8 @@ def generate_board_image(board):
 game_repo = GameRepository(r)
 
 
-async def handle_task_send(params: a2a.TaskSendParams):
-    session_id = params.sessionId
-    task_id = params.id
-    
+async def handle_message_send(params: a2a.MessageSendParams):
+    task_id = uuid().hex if not params.message.taskId else params.message.taskId
     game = game_repo.load(task_id)
 
     if not game:
@@ -178,40 +204,36 @@ async def handle_task_send(params: a2a.TaskSendParams):
 
     if user_move == "board":
         image_url, filename = generate_board_image(game.board)
-        return a2a.SendTaskResponse(
-            result=a2a.Task(
-                id=params.id,
-                sessionId=params.sessionId,
-                status=a2a.TaskStatus(
-                    state=a2a.TaskState.INPUT_REQUIRED,
-                    message=a2a.Message(
-                        role="agent",
-                        parts=[
-                            a2a.TextPart(text="Board state is:"),
-                            a2a.FilePart(
-                                file=a2a.FileContent(
-                                    name=filename,
-                                    mimeType="image/svg+xml",
-                                    uri=image_url,
-                                )
-                            ),
-                        ],
+        board_state_response = a2a.SendMessageResponse(
+            result=a2a.Message(
+                messageId=uuid().hex,
+                role="agent",
+                parts=[
+                    a2a.TextPart(text="Board state is:"),
+                    a2a.FilePart(
+                        file=a2a.FileContent(
+                            name=filename,
+                            mimeType="image/svg+xml",
+                            uri=image_url,
+                        )
                     ),
-                ),
+                ],
             ),
-        )        
+        )
+        return board_state_response
 
     if user_move == "resign":
-        return a2a.SendTaskResponse(
+        game_repo.game_over(task_id)
+        return a2a.SendMessageResponse(
             result=a2a.Task(
-                id=params.id,
-                sessionId=params.sessionId,
+                id=task_id,
                 status=a2a.TaskStatus(
-                    state=a2a.TaskState.COMPLETED,
+                    state=a2a.TaskState.completed,
                     message=a2a.Message(
+                        messageId=uuid().hex,
                         role="agent",
                         parts=[
-                            a2a.TextPart(text="Game ended by resignation."),
+                            a2a.TextPart(text="Game ended by resignation.\n"),
                             a2a.TextPart(
                                 text="Start a new game by entering a valid move."
                             ),
@@ -224,7 +246,8 @@ async def handle_task_send(params: a2a.TaskSendParams):
     try:
         game.usermove(user_move)
     except ValueError:
-        response = a2a.SendTaskResponse(
+        response = a2a.JSONRPCResponse(
+            messageId=uuid().hex,
             error=a2a.InvalidParamsError(
                 message=f"Invalid move: '{user_move}'",
                 data=f"You sent '{user_move}' which is not a valid chess move",
@@ -232,7 +255,8 @@ async def handle_task_send(params: a2a.TaskSendParams):
         )
         return response
     except:
-        response = a2a.SendTaskResponse(
+        response = a2a.JSONRPCResponse(
+            messageId=uuid().hex,
             error=a2a.InvalidParamsError(
                 message="An error occured",
             ),
@@ -244,14 +268,16 @@ async def handle_task_send(params: a2a.TaskSendParams):
     image_url, filename = generate_board_image(board)
 
     if board.is_game_over():
-        return a2a.SendTaskResponse(
+        game_repo.game_over(task_id)
+
+        return a2a.SendMessageResponse(
             result=a2a.Task(
                 id=task_id,
-                sessionId=session_id,
                 status=a2a.TaskStatus(
-                    state=a2a.TaskState.COMPLETED,
+                    state=a2a.TaskState.completed,
                     message=a2a.Message(
                         role="agent",
+                        messageId=uuid().hex,
                         parts=[
                             a2a.TextPart(text=f"Game over. AI moved {aimove.uci()}"),
                             a2a.FilePart(
@@ -268,14 +294,14 @@ async def handle_task_send(params: a2a.TaskSendParams):
             ),
         )
 
-    response = a2a.SendTaskResponse(
+    response = a2a.SendMessageResponse(
         result=a2a.Task(
             id=task_id,
-            sessionId=session_id,
             status=a2a.TaskStatus(
-                state=a2a.TaskState.WORKING,
+                state=a2a.TaskState.input_required,
                 message=a2a.Message(
                     role="agent",
+                    messageId=uuid().hex,
                     parts=[
                         a2a.TextPart(text=f"AI moved {aimove.uci()}"),
                         # a2a.TextPart(text=str(board)),
@@ -296,16 +322,18 @@ async def handle_task_send(params: a2a.TaskSendParams):
 
 
 async def handle_get_task(params: a2a.TaskQueryParams):
+    task_state = game_repo.task_state(params.id)
+
     response = a2a.GetTaskResponse(
         result=a2a.Task(
-            id="task_id",
-            sessionId="session_id",
+            id=params.id,
             status=a2a.TaskStatus(
-                state=a2a.TaskState.COMPLETED,
+                state=task_state,
                 message=a2a.Message(
+                    messageId=uuid().hex,
                     role="agent",
                     parts=[
-                        a2a.TextPart(text=f"Completed the stuff"),
+                        a2a.TextPart(text=f"The current task state is {task_state}"),
                     ],
                 ),
             ),
@@ -320,9 +348,9 @@ async def handle_rpc(request_data: dict):
         # Parse the request using the TypeAdapter
         rpc_request = a2a.A2ARequest.validate_python(request_data)
 
-        if isinstance(rpc_request, a2a.SendTaskRequest):
-            print("tasks/send")
-            return await handle_task_send(params=rpc_request.params)
+        if isinstance(rpc_request, a2a.SendMessageRequest):
+            print("Recieved message/send")
+            return await handle_message_send(params=rpc_request.params)
         elif isinstance(rpc_request, a2a.GetTaskRequest):
             print("tasks/get")
             return await handle_get_task(params=rpc_request.params)
@@ -355,7 +383,7 @@ def agent_card(request: Request):
         documentationUrl=f"{base_url}/docs",
         capabilities=a2a.AgentCapabilities(
             streaming=False,
-            pushNotifications=False,
+            pushNotifications=True,
             stateTransitionHistory=True,
         ),
         authentication=a2a.AgentAuthentication(schemes=["Bearer"]),
