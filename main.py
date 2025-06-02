@@ -3,6 +3,7 @@ import json
 import base64
 import random
 import datetime
+import httpx
 from typing import Tuple, Optional
 from dataclasses import dataclass
 from fastapi import FastAPI, BackgroundTasks, Request, Body, HTTPException
@@ -191,109 +192,75 @@ def generate_board_image(board):
 
 game_repo = GameRepository(r)
 
+def handle_user_move_as_board(game: Game):
+    image_url, filename = generate_board_image(game.board)
+    board_state_response = a2a.SendMessageResponse(
+        result=a2a.Message(
+            messageId=uuid().hex,
+            role="agent",
+            parts=[
+                a2a.TextPart(text="Board state is:"),
+                a2a.FilePart(
+                    file=a2a.FileContent(
+                        name=filename,
+                        mimeType="image/svg+xml",
+                        uri=image_url,
+                    )
+                ),
+            ],
+        ),
+    )
+    return board_state_response
 
-async def handle_message_send(params: a2a.MessageSendParams):
-    task_id = uuid().hex if not params.message.taskId else params.message.taskId
-    game = game_repo.load(task_id)
-
-    if not game:
-        game = game_repo.start_game(engine_path=CHESS_ENGINE_PATH)
-
-    user_input = params.message.parts[0].text.strip()
-    user_move = game_repo.parse_command(user_input)
-
-    if user_move == "board":
-        image_url, filename = generate_board_image(game.board)
-        board_state_response = a2a.SendMessageResponse(
-            result=a2a.Message(
-                messageId=uuid().hex,
-                role="agent",
-                parts=[
-                    a2a.TextPart(text="Board state is:"),
-                    a2a.FilePart(
-                        file=a2a.FileContent(
-                            name=filename,
-                            mimeType="image/svg+xml",
-                            uri=image_url,
-                        )
-                    ),
-                ],
-            ),
-        )
-        return board_state_response
-
-    if user_move == "resign":
-        game_repo.game_over(task_id)
-        return a2a.SendMessageResponse(
-            result=a2a.Task(
-                id=task_id,
-                status=a2a.TaskStatus(
-                    state=a2a.TaskState.completed,
-                    message=a2a.Message(
-                        messageId=uuid().hex,
-                        role="agent",
-                        parts=[
-                            a2a.TextPart(text="Game ended by resignation.\n"),
-                            a2a.TextPart(
-                                text="Start a new game by entering a valid move."
-                            ),
-                        ],
-                    ),
+def handle_resignation(task_id: str):
+    game_repo.game_over(task_id)
+    return a2a.SendMessageResponse(
+        result=a2a.Task(
+            id=task_id,
+            status=a2a.TaskStatus(
+                state=a2a.TaskState.completed,
+                message=a2a.Message(
+                    messageId=uuid().hex,
+                    role="agent",
+                    parts=[
+                        a2a.TextPart(text="Game ended by resignation.\n"),
+                        a2a.TextPart(
+                            text="Start a new game by entering a valid move."
+                        ),
+                    ],
                 ),
             ),
-        )
+        ),
+    )
 
-    try:
-        game.usermove(user_move)
-    except ValueError:
-        response = a2a.JSONRPCResponse(
-            messageId=uuid().hex,
-            error=a2a.InvalidParamsError(
-                message=f"Invalid move: '{user_move}'",
-                data=f"You sent '{user_move}' which is not a valid chess move",
-            ),
-        )
-        return response
-    except:
-        response = a2a.JSONRPCResponse(
-            messageId=uuid().hex,
-            error=a2a.InvalidParamsError(
-                message="An error occured",
-            ),
-        )
-        return response
+def handle_game_over(task_id:str, aimove, filename:str, image_url:str):
+    game_repo.game_over(task_id)
 
-    aimove, board = game.aimove()
-    game_repo.save(task_id, game)
-    image_url, filename = generate_board_image(board)
-
-    if board.is_game_over():
-        game_repo.game_over(task_id)
-
-        return a2a.SendMessageResponse(
-            result=a2a.Task(
-                id=task_id,
-                status=a2a.TaskStatus(
-                    state=a2a.TaskState.completed,
-                    message=a2a.Message(
-                        role="agent",
-                        messageId=uuid().hex,
-                        parts=[
-                            a2a.TextPart(text=f"Game over. AI moved {aimove.uci()}"),
-                            a2a.FilePart(
-                                file=a2a.FileContent(
-                                    name=filename,
-                                    mimeType="image/svg+xml",
-                                    uri=image_url,
-                                )
-                            ),
-                            a2a.TextPart(text="Start a new game by entering a valid move"),
-                        ],
-                    ),
+    return a2a.SendMessageResponse(
+        result=a2a.Task(
+            id=task_id,
+            status=a2a.TaskStatus(
+                state=a2a.TaskState.completed,
+                message=a2a.Message(
+                    role="agent",
+                    messageId=uuid().hex,
+                    parts=[
+                        a2a.TextPart(text=f"Game over. AI moved {aimove.uci()}"),
+                        a2a.FilePart(
+                            file=a2a.FileContent(
+                                name=filename,
+                                mimeType="image/svg+xml",
+                                uri=image_url,
+                            )
+                        ),
+                        a2a.TextPart(text="Start a new game by entering a valid move"),
+                    ],
                 ),
             ),
-        )
+        ),
+    )
 
+def handle_final_response(task_id:str, aimove, filename:str, image_url: str):
     response = a2a.SendMessageResponse(
         result=a2a.Task(
             id=task_id,
@@ -321,6 +288,53 @@ async def handle_message_send(params: a2a.MessageSendParams):
     return response
 
 
+async def handle_message_send(params: a2a.MessageSendParams):
+    task_id = uuid().hex if not params.message.taskId else params.message.taskId
+    game = game_repo.load(task_id)
+
+    if not game:
+        game = game_repo.start_game(engine_path=CHESS_ENGINE_PATH)
+
+    user_input = params.message.parts[0].text.strip()
+    user_move = game_repo.parse_command(user_input)
+
+    if user_move == "board":
+        return handle_user_move_as_board(game)
+
+    if user_move == "resign":
+        return handle_resignation(task_id)
+
+    try:
+        game.usermove(user_move)
+    except ValueError:
+        response = a2a.JSONRPCResponse(
+            messageId=uuid().hex,
+            error=a2a.InvalidParamsError(
+                message=f"Invalid move: '{user_move}'",
+                data=f"You sent '{user_move}' which is not a valid chess move",
+            ),
+        )
+        return response
+    except:
+        response = a2a.JSONRPCResponse(
+            messageId=uuid().hex,
+            error=a2a.InvalidParamsError(
+                message="An error occured",
+            ),
+        )
+        return response
+
+    aimove, board = game.aimove()
+    game_repo.save(task_id, game)
+    image_url, filename = generate_board_image(board)
+
+    if board.is_game_over():
+        return handle_game_over(task_id, aimove, filename, image_url)
+
+    return handle_final_response(task_id, aimove, filename, image_url)
+
+
+
 async def handle_get_task(params: a2a.TaskQueryParams):
     task_state = game_repo.task_state(params.id)
 
@@ -342,6 +356,45 @@ async def handle_get_task(params: a2a.TaskQueryParams):
 
     return response
 
+def safe_get(obj, *attrs):
+    for attr in attrs:
+        obj = getattr(obj, attr, None)
+        if obj is None:
+            return None
+    return obj
+
+
+async def handle_message_send_with_webhook(params: a2a.MessageSendParams):
+    webhook_url = safe_get(params, "configuration", "pushNotificationConfig", "url")
+
+    if not webhook_url:
+        return a2a.JSONRPCResponse(
+            messageId=uuid().hex,
+            error=a2a.InvalidParamsError(
+                message="No webhook URL provided, but is necessary",
+            ),
+        )
+    
+    task_id = uuid().hex if not params.message.taskId else params.message.taskId
+    game = game_repo.load(task_id)
+
+    if not game:
+        game = game_repo.start_game(engine_path=CHESS_ENGINE_PATH)
+
+    user_input = params.message.parts[0].text.strip()
+    user_move = game_repo.parse_command(user_input)
+
+    aimove, board = game.aimove()
+    game_repo.save(task_id, game)
+    image_url, filename = generate_board_image(board)
+
+    final_response = handle_final_response(task_id, aimove, filename, image_url)
+
+    # httpx.post(webhook_url, json=final_response.model_dump())
+    print(webhook_url, final_response.model_dump_json())
+    httpx.post(webhook_url, json='{"username": "Bro bro", "message": "Normal chat"}')
+
+
 @app.post("/")
 async def handle_rpc(request_data: dict):
     try:
@@ -350,7 +403,8 @@ async def handle_rpc(request_data: dict):
 
         if isinstance(rpc_request, a2a.SendMessageRequest):
             print("Recieved message/send")
-            return await handle_message_send(params=rpc_request.params)
+            # return await handle_message_send(params=rpc_request.params)
+            return await handle_message_send_with_webhook(params=rpc_request.params)
         elif isinstance(rpc_request, a2a.GetTaskRequest):
             print("tasks/get")
             return await handle_get_task(params=rpc_request.params)
