@@ -32,7 +32,7 @@ class TaskState(str, Enum):
     auth_required = 'auth_required'
 
 class TextPart(BaseModel):
-    type: Literal['text'] = 'text'
+    kind: Literal['text'] = 'text'
     text: str
     metadata: dict[str, Any] | None = None
 
@@ -57,13 +57,13 @@ class FileContent(BaseModel):
 
 
 class FilePart(BaseModel):
-    type: Literal['file'] = 'file'
+    kind: Literal['file'] = 'file'
     file: FileContent
     metadata: dict[str, Any] | None = None
 
 
 class DataPart(BaseModel):
-    type: Literal['data'] = 'data'
+    kind: Literal['data'] = 'data'
     data: dict[str, Any]
     metadata: dict[str, Any] | None = None
 
