@@ -115,7 +115,7 @@ class GameRepository:
             except ValueError:
                 return a2a.TaskState.unknown
 
-        return a2a.TaskState().unknown
+        return a2a.TaskState.unknown
 
     def save(self, task_id: str, game: Game):
         key = self._game_key(task_id)
@@ -364,7 +364,51 @@ def safe_get(obj, *attrs):
     return obj
 
 
-async def handle_message_send_with_webhook(params: a2a.MessageSendParams):
+async def actual_messaging(params: a2a.MessageSendParams, webhook_url: str, task_id):
+    game = game_repo.load(task_id)
+
+    if not game:
+        game = game_repo.start_game(engine_path=CHESS_ENGINE_PATH)
+
+    user_input = params.message.parts[0].text.strip()
+    user_move = game_repo.parse_command(user_input)
+
+    error_response = None
+
+    try:
+        game.usermove(user_move)
+    except ValueError:
+        error_response = a2a.JSONRPCResponse(
+            messageId=uuid().hex,
+            error=a2a.InvalidParamsError(
+                message=f"Invalid move: '{user_move}'",
+                data=f"You sent '{user_move}' which is not a valid chess move",
+            ),
+        )
+        
+    except:
+        error_response = a2a.JSONRPCResponse(
+            messageId=uuid().hex,
+            error=a2a.InvalidParamsError(
+                message="An error occured",
+            ),
+        )
+
+    if error_response:
+        res = httpx.post(webhook_url, json=error_response.model_dump())
+        print(res)
+
+    aimove, board = game.aimove()
+    game_repo.save(task_id, game)
+    image_url, filename = generate_board_image(board)
+
+    final_response = handle_final_response(task_id, aimove, filename, image_url)
+
+    print(webhook_url, final_response.model_dump_json())
+    res = httpx.post(webhook_url, json=final_response.model_dump())
+    print(res)
+
+async def handle_message_send_with_webhook(params: a2a.MessageSendParams, background_tasks: BackgroundTasks):
     webhook_url = safe_get(params, "configuration", "pushNotificationConfig", "url")
 
     if not webhook_url:
@@ -375,28 +419,24 @@ async def handle_message_send_with_webhook(params: a2a.MessageSendParams):
             ),
         )
     
-    task_id = uuid().hex if not params.message.taskId else params.message.taskId
-    game = game_repo.load(task_id)
+    existing_task_id = params.message.taskId
+    task_id = existing_task_id if existing_task_id else uuid().hex
 
-    if not game:
-        game = game_repo.start_game(engine_path=CHESS_ENGINE_PATH)
+    background_tasks.add_task(actual_messaging, params, webhook_url, task_id)
 
-    user_input = params.message.parts[0].text.strip()
-    user_move = game_repo.parse_command(user_input)
 
-    aimove, board = game.aimove()
-    game_repo.save(task_id, game)
-    image_url, filename = generate_board_image(board)
-
-    final_response = handle_final_response(task_id, aimove, filename, image_url)
-
-    # httpx.post(webhook_url, json=final_response.model_dump())
-    print(webhook_url, final_response.model_dump_json())
-    httpx.post(webhook_url, json='{"username": "Bro bro", "message": "Normal chat"}')
+    return a2a.SendMessageResponse(
+        result=a2a.Task(
+            id=task_id,
+            status=a2a.TaskStatus(
+                state=a2a.TaskState.working
+            )
+        ),
+    )
 
 
 @app.post("/")
-async def handle_rpc(request_data: dict):
+async def handle_rpc(request_data: dict, background_tasks: BackgroundTasks):
     try:
         # Parse the request using the TypeAdapter
         rpc_request = a2a.A2ARequest.validate_python(request_data)
@@ -404,7 +444,7 @@ async def handle_rpc(request_data: dict):
         if isinstance(rpc_request, a2a.SendMessageRequest):
             print("Recieved message/send")
             # return await handle_message_send(params=rpc_request.params)
-            return await handle_message_send_with_webhook(params=rpc_request.params)
+            return await handle_message_send_with_webhook(params=rpc_request.params, background_tasks=background_tasks)
         elif isinstance(rpc_request, a2a.GetTaskRequest):
             print("tasks/get")
             return await handle_get_task(params=rpc_request.params)
