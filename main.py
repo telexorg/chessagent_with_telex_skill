@@ -4,7 +4,7 @@ import base64
 import random
 import datetime
 import httpx
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Any
 from dataclasses import dataclass
 from fastapi import FastAPI, BackgroundTasks, Request, Body, HTTPException
 from fastapi.responses import HTMLResponse
@@ -364,7 +364,7 @@ def safe_get(obj, *attrs):
     return obj
 
 
-async def actual_messaging(params: a2a.MessageSendParams, webhook_url: str, task_id):
+async def actual_messaging(params: a2a.MessageSendParams, task_id:str, webhook_url: str, auth_headers: dict[str, Any]):
     game = game_repo.load(task_id)
 
     if not game:
@@ -405,11 +405,18 @@ async def actual_messaging(params: a2a.MessageSendParams, webhook_url: str, task
     final_response = handle_final_response(task_id, aimove, filename, image_url)
 
     print(webhook_url, final_response.model_dump_json())
-    res = httpx.post(webhook_url, json=final_response.model_dump())
+    res = httpx.post(webhook_url, headers=auth_headers, json=final_response.model_dump())
     print(res)
 
 async def handle_message_send_with_webhook(params: a2a.MessageSendParams, background_tasks: BackgroundTasks):
     webhook_url = safe_get(params, "configuration", "pushNotificationConfig", "url")
+    scheme = safe_get(params, "configuration", "pushNotificationConfig", "authentication", "schemes")
+    credential = safe_get(params, "configuration", "pushNotificationConfig", "authentication", "credentials")
+
+    auth_headers = {}
+
+    if "TelexApiKey" in scheme:
+        auth_headers["X-TELEX-API-KEY"] = credential
 
     if not webhook_url:
         return a2a.JSONRPCResponse(
@@ -422,7 +429,7 @@ async def handle_message_send_with_webhook(params: a2a.MessageSendParams, backgr
     existing_task_id = params.message.taskId
     task_id = existing_task_id if existing_task_id else uuid().hex
 
-    background_tasks.add_task(actual_messaging, params, webhook_url, task_id)
+    background_tasks.add_task(actual_messaging, params, task_id, webhook_url, auth_headers)
 
 
     return a2a.SendMessageResponse(
