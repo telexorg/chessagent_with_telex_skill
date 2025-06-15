@@ -18,7 +18,7 @@ jobs:
           username: ${{ secrets.TELEX_SERVER_SSH_USER }}
           key: ${{ secrets.TELEX_SERVER_SSH_KEY }}
           script: |
-            cd /var/www/chessagent_with_telex_extensions
+            cd /var/www/chessagent_with_telex_skill
             git pull origin main
             uv sync
             supervisorctl restart chess_agent_with_telex_skill
