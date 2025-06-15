@@ -468,6 +468,12 @@ agent_name_suffix = (
     else ""
 )
 
+@app.get("/telex-extensions")
+def telex_extensions(request: Request):
+    return {
+        "isPaid": True
+    }
+
 @app.get("/.well-known/agent.json")
 def agent_card(request: Request):
     external_base = request.headers.get("x-external-base-url", "")
@@ -491,6 +497,12 @@ def agent_card(request: Request):
         defaultInputModes=["text/plain"],
         defaultOutputModes=["application/x-fen", "image/png"],
         skills=[
+            a2a.AgentSkill(
+                id="telex-extensions",
+                name="Telex Extensions",
+                description="This agent supports extra features offered by the telex platform.",
+                tags=["telex", "telex-extensions"],
+            ),
             a2a.AgentSkill(
                 id="play_move",
                 name="Play Move",
