@@ -4,7 +4,7 @@ import base64
 import random
 import datetime
 import httpx
-from typing import Tuple, Optional, Any
+from typing import Tuple, Optional, Any, Union
 from dataclasses import dataclass
 from fastapi import FastAPI, BackgroundTasks, Request, Body, HTTPException
 from fastapi.responses import HTMLResponse
@@ -19,10 +19,9 @@ from minio.error import S3Error
 
 load_dotenv()
 app = FastAPI()
-
 r = redis.Redis(host="localhost", port=6379, decode_responses=True)
-CHESS_ENGINE_PATH = os.getenv("CHESS_ENGINE_PATH")
 
+CHESS_ENGINE_PATH = os.getenv("CHESS_ENGINE_PATH")
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
 MINIO_BUCKET_NAME = os.getenv("MINIO_BUCKET_NAME")
 MINIO_BUCKET_ACCESS_KEY = os.getenv("MINIO_BUCKET_ACCESS_KEY")
@@ -34,11 +33,9 @@ minio_client = Minio(
     secret_key=MINIO_BUKCET_SECRET_KEY,
 )
 
-
 @dataclass
 class RedisKeys:
     games = "games"
-
 
 class RandomNameRepository:
     WORDS = [
@@ -46,24 +43,24 @@ class RandomNameRepository:
         "wind", "storm", "leaf", "sky", "night", "light", "shadow", "mountain",
         "ocean", "echo", "whisper", "flame", "dust", "branch",
     ]
-
+    
     @classmethod
     def generate_filename(cls, extension: str = "svg", word_count: int = 3) -> str:
         words = random.sample(cls.WORDS, word_count)
         return "_".join(words) + f".{extension}"
-
+    
     @classmethod
     def generate_suffix(cls, word_count: int = 2) -> str:
         return "_".join(random.sample(cls.WORDS, word_count))
 
 class Game:
-    def __init__(self, board, engine, engine_time_limit=0.5, state=a2a.TaskState.unknown):
+    def __init__(self, board: chess.Board, engine, engine_time_limit=0.5, state=a2a.TaskState.unknown):
         self.board = board
         self.engine = engine
         self.engine_time_limit = engine_time_limit
         self.state = state
 
-    def aimove(self):
+    def aimove(self) -> Tuple[str, chess.Board]:
         ai = self.engine.play(
             self.board, chess.engine.Limit(time=self.engine_time_limit)
         )
@@ -87,14 +84,11 @@ class Game:
         engine_time_limit = data.get("engine_time_limit", 0.5)
         engine = chess.engine.SimpleEngine.popen_uci(CHESS_ENGINE_PATH)
         state_str = data.get("state", "unknown")
-
         try:
             state = a2a.TaskState(state_str)
         except ValueError:
             state = a2a.TaskState.unknown
-
         return cls(board, engine, engine_time_limit, state)
-
 
 class GameRepository:
     def __init__(self, redis_client, redis_key_prefix=RedisKeys.games):
@@ -114,7 +108,6 @@ class GameRepository:
                 return a2a.TaskState(state_str)
             except ValueError:
                 return a2a.TaskState.unknown
-
         return a2a.TaskState.unknown
 
     def save(self, task_id: str, game: Game):
@@ -141,60 +134,52 @@ class GameRepository:
     def start_game(self, engine_path: str) -> Game:
         engine = chess.engine.SimpleEngine.popen_uci(engine_path)
         board = chess.Board()
-
         return Game(board, engine)
 
     def parse_command(self, message: str) -> str:
         message = message.strip()
         message_lowercase = message.lower()
-
         if "resign" in message_lowercase:
             return "resign"
         if "board" in message_lowercase:
             return "board"
-
         return message
-
 
 @app.get("/", response_class=HTMLResponse)
 def read_root():
     return '<p style="font-size:40px">Chessagent with Telex Skill</p>'
 
-
 def generate_board_image(board):
     filename = RandomNameRepository.generate_filename()
     destination_file = f"public/chessagent/{filename}"
     source_file = f"/tmp/{filename}"
-
+    
     svg = board._repr_svg_()
-
     with open(source_file, "w") as f:
         f.write(svg)
-        new_source_file = source_file.split(".svg")[0] + ".png"
-
-        import cairosvg
-
-        cairosvg.svg2png(url=source_file, write_to=new_source_file)
-
-        source_file = new_source_file
-        destination_file = destination_file.split(".svg")[0] + ".png"
-
+    
+    new_source_file = source_file.split(".svg")[0] + ".png"
+    import cairosvg
+    cairosvg.svg2png(url=source_file, write_to=new_source_file)
+    source_file = new_source_file
+    destination_file = destination_file.split(".svg")[0] + ".png"
+    
     minio_client.fput_object(
         MINIO_BUCKET_NAME,
         destination_file,
         source_file,
     )
-
+    
     image_url = f"https://media.tifi.tv/{MINIO_BUCKET_NAME}/{destination_file}"
-
     return image_url, filename
-
 
 game_repo = GameRepository(r)
 
-def handle_user_move_as_board(game: Game):
+# Consolidated response handlers
+def create_board_response(game: Game) -> a2a.SendMessageResponse:
+    """Create a response showing the current board state"""
     image_url, filename = generate_board_image(game.board)
-    board_state_response = a2a.SendMessageResponse(
+    return a2a.SendMessageResponse(
         result=a2a.Message(
             messageId=uuid().hex,
             role="agent",
@@ -210,9 +195,9 @@ def handle_user_move_as_board(game: Game):
             ],
         ),
     )
-    return board_state_response
 
-def handle_resignation(task_id: str):
+def create_resignation_response(task_id: str) -> a2a.SendMessageResponse:
+    """Create a response for game resignation"""
     game_repo.game_over(task_id)
     return a2a.SendMessageResponse(
         result=a2a.Task(
@@ -224,18 +209,16 @@ def handle_resignation(task_id: str):
                     role="agent",
                     parts=[
                         a2a.TextPart(text="Game ended by resignation.\n"),
-                        a2a.TextPart(
-                            text="Start a new game by entering a valid move."
-                        ),
+                        a2a.TextPart(text="Start a new game by entering a valid move.")
                     ],
                 ),
             ),
         ),
     )
 
-def handle_game_over(task_id:str, aimove, filename:str, image_url:str):
+def create_game_over_response(task_id: str, aimove, filename: str, image_url: str) -> a2a.SendMessageResponse:
+    """Create a response when the game is over"""
     game_repo.game_over(task_id)
-
     return a2a.SendMessageResponse(
         result=a2a.Task(
             id=task_id,
@@ -260,8 +243,9 @@ def handle_game_over(task_id:str, aimove, filename:str, image_url:str):
         ),
     )
 
-def handle_final_response(task_id:str, aimove, filename:str, image_url: str):
-    response = a2a.SendMessageResponse(
+def create_move_response(task_id: str, aimove, filename: str, image_url: str) -> a2a.SendMessageResponse:
+    """Create a response after a successful move"""
+    return a2a.SendMessageResponse(
         result=a2a.Task(
             id=task_id,
             status=a2a.TaskStatus(
@@ -271,7 +255,6 @@ def handle_final_response(task_id:str, aimove, filename:str, image_url: str):
                     messageId=uuid().hex,
                     parts=[
                         a2a.TextPart(text=f"AI moved {aimove.uci()}"),
-                        # a2a.TextPart(text=str(board)),
                         a2a.FilePart(
                             file=a2a.FileContent(
                                 name=filename,
@@ -285,59 +268,71 @@ def handle_final_response(task_id:str, aimove, filename:str, image_url: str):
         ),
     )
 
-    return response
+def create_error_response(message: str, data: str = None) -> a2a.JSONRPCResponse:
+    """Create an error response"""
+    return a2a.JSONRPCResponse(
+        messageId=uuid().hex,
+        error=a2a.InvalidParamsError(
+            message=message,
+            data=data,
+        ),
+    )
 
-
-async def handle_message_send(params: a2a.MessageSendParams):
-    task_id = uuid().hex if not params.message.taskId else params.message.taskId
+# Core game logic that both immediate and webhook responses use
+def process_game_move(params: a2a.MessageSendParams, task_id: str) -> Union[a2a.SendMessageResponse, a2a.JSONRPCResponse]:
+    """Process a game move and return the appropriate response"""
     game = game_repo.load(task_id)
-
     if not game:
         game = game_repo.start_game(engine_path=CHESS_ENGINE_PATH)
 
     user_input = params.message.parts[0].text.strip()
     user_move = game_repo.parse_command(user_input)
 
+    # Handle special commands
     if user_move == "board":
-        return handle_user_move_as_board(game)
-
+        return create_board_response(game)
+    
     if user_move == "resign":
-        return handle_resignation(task_id)
+        return create_resignation_response(task_id)
 
+    # Handle regular moves
     try:
         game.usermove(user_move)
     except ValueError:
-        response = a2a.JSONRPCResponse(
-            messageId=uuid().hex,
-            error=a2a.InvalidParamsError(
-                message=f"Invalid move: '{user_move}'",
-                data=f"You sent '{user_move}' which is not a valid chess move",
-            ),
+        return create_error_response(
+            f"Invalid move: '{user_move}'",
+            f"You sent '{user_move}' which is not a valid chess move"
         )
-        return response
     except:
-        response = a2a.JSONRPCResponse(
-            messageId=uuid().hex,
-            error=a2a.InvalidParamsError(
-                message="An error occured",
-            ),
-        )
-        return response
+        return create_error_response("An error occurred")
 
+    # AI makes its move
     aimove, board = game.aimove()
     game_repo.save(task_id, game)
     image_url, filename = generate_board_image(board)
 
+    # Check if game is over
     if board.is_game_over():
-        return handle_game_over(task_id, aimove, filename, image_url)
+        return create_game_over_response(task_id, aimove, filename, image_url)
+    
+    return create_move_response(task_id, aimove, filename, image_url)
 
-    return handle_final_response(task_id, aimove, filename, image_url)
+# Immediate response handler
+async def handle_message_send(params: a2a.MessageSendParams):
+    task_id = uuid().hex if not params.message.taskId else params.message.taskId
+    return process_game_move(params, task_id)
 
-
+# Webhook response handler
+async def webhook_game_processing(params: a2a.MessageSendParams, task_id: str, webhook_url: str, auth_headers: dict[str, Any]):
+    """Process game move and send response via webhook"""
+    response = process_game_move(params, task_id)
+    
+    print(webhook_url, response.model_dump_json())
+    res = httpx.post(webhook_url, headers=auth_headers, json=response.model_dump())
+    print(res)
 
 async def handle_get_task(params: a2a.TaskQueryParams):
     task_state = game_repo.task_state(params.id)
-
     response = a2a.GetTaskResponse(
         result=a2a.Task(
             id=params.id,
@@ -353,7 +348,6 @@ async def handle_get_task(params: a2a.TaskQueryParams):
             ),
         ),
     )
-
     return response
 
 def safe_get(obj, *attrs):
@@ -363,58 +357,12 @@ def safe_get(obj, *attrs):
             return None
     return obj
 
-
-async def actual_messaging(params: a2a.MessageSendParams, task_id:str, webhook_url: str, auth_headers: dict[str, Any]):
-    game = game_repo.load(task_id)
-
-    if not game:
-        game = game_repo.start_game(engine_path=CHESS_ENGINE_PATH)
-
-    user_input = params.message.parts[0].text.strip()
-    user_move = game_repo.parse_command(user_input)
-
-    error_response = None
-
-    try:
-        game.usermove(user_move)
-    except ValueError:
-        error_response = a2a.JSONRPCResponse(
-            messageId=uuid().hex,
-            error=a2a.InvalidParamsError(
-                message=f"Invalid move: '{user_move}'",
-                data=f"You sent '{user_move}' which is not a valid chess move",
-            ),
-        )
-        
-    except:
-        error_response = a2a.JSONRPCResponse(
-            messageId=uuid().hex,
-            error=a2a.InvalidParamsError(
-                message="An error occured",
-            ),
-        )
-
-    if error_response:
-        res = httpx.post(webhook_url, json=error_response.model_dump())
-        print(res)
-
-    aimove, board = game.aimove()
-    game_repo.save(task_id, game)
-    image_url, filename = generate_board_image(board)
-
-    final_response = handle_final_response(task_id, aimove, filename, image_url)
-
-    print(webhook_url, final_response.model_dump_json())
-    res = httpx.post(webhook_url, headers=auth_headers, json=final_response.model_dump())
-    print(res)
-
 async def handle_message_send_with_webhook(params: a2a.MessageSendParams, background_tasks: BackgroundTasks):
     webhook_url = safe_get(params, "configuration", "pushNotificationConfig", "url")
     scheme = safe_get(params, "configuration", "pushNotificationConfig", "authentication", "schemes")
     credential = safe_get(params, "configuration", "pushNotificationConfig", "authentication", "credentials")
-
+    
     auth_headers = {}
-
     if "TelexApiKey" in scheme:
         auth_headers["X-TELEX-API-KEY"] = credential
 
@@ -425,13 +373,12 @@ async def handle_message_send_with_webhook(params: a2a.MessageSendParams, backgr
                 message="No webhook URL provided, but is necessary",
             ),
         )
-    
+
     existing_task_id = params.message.taskId
     task_id = existing_task_id if existing_task_id else uuid().hex
-
-    background_tasks.add_task(actual_messaging, params, task_id, webhook_url, auth_headers)
-
-
+    
+    background_tasks.add_task(webhook_game_processing, params, task_id, webhook_url, auth_headers)
+    
     return a2a.SendMessageResponse(
         result=a2a.Task(
             id=task_id,
@@ -441,15 +388,14 @@ async def handle_message_send_with_webhook(params: a2a.MessageSendParams, backgr
         ),
     )
 
-
 @app.post("/")
 async def handle_rpc(request_data: dict, background_tasks: BackgroundTasks):
     try:
         # Parse the request using the TypeAdapter
         rpc_request = a2a.A2ARequest.validate_python(request_data)
-
+        
         if isinstance(rpc_request, a2a.SendMessageRequest):
-            print("Recieved message/send")
+            print("Received message/send")
             # return await handle_message_send(params=rpc_request.params)
             return await handle_message_send_with_webhook(params=rpc_request.params, background_tasks=background_tasks)
         elif isinstance(rpc_request, a2a.GetTaskRequest):
@@ -457,7 +403,7 @@ async def handle_rpc(request_data: dict, background_tasks: BackgroundTasks):
             return await handle_get_task(params=rpc_request.params)
         else:
             raise HTTPException(status_code=400, detail="Method not supported")
-            
+
     except Exception as e:
         print(f"Error processing request: {e}")
         raise HTTPException(status_code=400, detail="Could not handle task")
@@ -514,13 +460,9 @@ def agent_card(request: Request):
             )
         ],
     )
-
     return card
-
 
 if __name__ == "__main__":
     import uvicorn
-
     PORT = int(os.getenv("PORT", 7000))
-
     uvicorn.run("main:app", host="127.0.0.1", port=PORT, reload=True)
