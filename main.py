@@ -363,7 +363,7 @@ async def handle_message_send_with_webhook(params: a2a.MessageSendParams, backgr
     credential = safe_get(params, "configuration", "pushNotificationConfig", "authentication", "credentials")
     
     auth_headers = {}
-    if "TelexApiKey" in scheme:
+    if scheme and credential and "TelexApiKey" in scheme:
         auth_headers["X-TELEX-API-KEY"] = credential
 
     if not webhook_url:
