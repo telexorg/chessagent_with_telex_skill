@@ -158,7 +158,7 @@ class GameRepository:
 
 @app.get("/", response_class=HTMLResponse)
 def read_root():
-    return '<p style="font-size:40px">Chess bot A2A</p>'
+    return '<p style="font-size:40px">Chessagent with Telex Skill</p>'
 
 
 def generate_board_image(board):
@@ -479,7 +479,7 @@ def agent_card(request: Request):
     external_base = request.headers.get("x-external-base-url", "")
     base_url = str(request.base_url).rstrip("/") + external_base
     card = a2a.AgentCard(
-        name=f"Chess Agent {agent_name_suffix}",
+        name=f"Chess Agent with Telex Skill {agent_name_suffix}",
         description="An agent that plays chess. Accepts moves in standard notation and returns updated board state as FEN and an image.",
         url=f"{base_url}",
         provider=a2a.AgentProvider(
